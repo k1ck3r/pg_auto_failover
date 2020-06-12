@@ -28,6 +28,9 @@
 #include "service_keeper.h"
 #include "service_monitor.h"
 #include "signals.h"
+#include "string_utils.h"
+#include "supervisor.h"
+
 
 static int stop_signal = SIGTERM;
 
@@ -40,6 +43,12 @@ static int cli_getopt_pgdata_and_mode(int argc, char **argv);
 static void cli_service_stop(int argc, char **argv);
 static void cli_service_reload(int argc, char **argv);
 static void cli_service_status(int argc, char **argv);
+
+static void cli_service_restart(const char *serviceName);
+static void cli_service_restart_all(int argc, char **argv);
+static void cli_service_restart_postgres(int argc, char **argv);
+static void cli_service_restart_listener(int argc, char **argv);
+static void cli_service_restart_node_active(int argc, char **argv);
 
 CommandLine service_run_command =
 	make_command("run",
@@ -74,6 +83,51 @@ CommandLine service_status_command =
 				 CLI_PGDATA_OPTION,
 				 cli_getopt_pgdata,
 				 cli_service_status);
+
+CommandLine service_restart_all =
+	make_command("all",
+				 "Restart all the pg_autoctl services",
+				 CLI_PGDATA_USAGE,
+				 CLI_PGDATA_OPTION,
+				 cli_getopt_pgdata,
+				 cli_service_restart_all);
+
+CommandLine service_restart_postgres =
+	make_command("postgres",
+				 "Restart the pg_autoctl postgres controller service",
+				 CLI_PGDATA_USAGE,
+				 CLI_PGDATA_OPTION,
+				 cli_getopt_pgdata,
+				 cli_service_restart_postgres);
+
+CommandLine service_restart_listener =
+	make_command("listener",
+				 "Restart the pg_autoctl monitor listener service",
+				 CLI_PGDATA_USAGE,
+				 CLI_PGDATA_OPTION,
+				 cli_getopt_pgdata,
+				 cli_service_restart_listener);
+
+CommandLine service_restart_node_active =
+	make_command("node-active",
+				 "Restart the pg_autoctl keeper node-active service",
+				 CLI_PGDATA_USAGE,
+				 CLI_PGDATA_OPTION,
+				 cli_getopt_pgdata,
+				 cli_service_restart_node_active);
+
+static CommandLine *service_restart[] = {
+	&service_restart_all,
+	&service_restart_postgres,
+	&service_restart_listener,
+	&service_restart_node_active,
+	NULL
+};
+
+CommandLine service_restart_commands =
+	make_command_set("restart",
+					 "Restart pg_autoctl sub-processes (services)", NULL, NULL,
+					 NULL, service_restart);
 
 
 /*
@@ -448,4 +502,166 @@ cli_service_status(int argc, char **argv)
 	}
 
 	exit(EXIT_CODE_QUIT);
+}
+
+
+/*
+ * cli_service_restart sends the TERM signal to the given serviceName, which
+ * is known to have the restart policy RP_PERMANENT (that's hard-coded). As a
+ * consequence the supervisor will restart the service.
+ */
+static void
+cli_service_restart(const char *serviceName)
+{
+	ConfigFilePaths pathnames = { 0 };
+	LocalPostgresServer postgres = { 0 };
+
+	pid_t pid = -1;
+	pid_t newPid = -1;
+
+	if (!cli_common_pgsetup_init(&pathnames, &(postgres.postgresSetup)))
+	{
+		/* errors have already been logged */
+		exit(EXIT_CODE_BAD_CONFIG);
+	}
+
+	if (!supervisor_find_service_pid(pathnames.pid, serviceName, &pid))
+	{
+		log_fatal("Failed to find pid for service name \"%s\"", serviceName);
+		exit(EXIT_CODE_INTERNAL_ERROR);
+	}
+
+	log_info("Sending the TERM signal to service \"%s\" with pid %d",
+			 serviceName, pid);
+
+	if (kill(pid, SIGTERM) != 0)
+	{
+		log_error("Failed to send SIGHUP to the pg_autoctl pid %d: %m", pid);
+		exit(EXIT_CODE_INTERNAL_ERROR);
+	}
+
+	/* loop until we have a new pid */
+	do {
+		if (!supervisor_find_service_pid(pathnames.pid, serviceName, &newPid))
+		{
+			log_fatal("Failed to find pid for service name \"%s\"", serviceName);
+			exit(EXIT_CODE_INTERNAL_ERROR);
+		}
+
+		if (newPid == pid)
+		{
+			log_trace("pidfile \"%s\" still contains pid %d for service \"%s\"",
+					  pathnames.pid, newPid, serviceName);
+		}
+
+		pg_usleep(100 * 1000);  /* retry in 100 ms */
+	} while (newPid == pid);
+
+	log_info("Service \"%s\" has been restarted with pid %d",
+			 serviceName, newPid);
+
+	fformat(stdout, "%d\n", pid);
+}
+
+
+/*
+ * cli_service_restart_postgres sends the TERM signal to the postgres
+ * service, which is known to have the restart policy RP_PERMANENT (that's
+ * hard-coded). As a consequence the supervisor will restart the service.
+ */
+static void
+cli_service_restart_postgres(int argc, char **argv)
+{
+	(void) cli_service_restart("postgres");
+}
+
+
+/*
+ * cli_service_restart_postgres sends the TERM signal to the monitor
+ * listener service, which is known to have the restart policy RP_PERMANENT
+ * (that's hard-coded). As a consequence the supervisor will restart the
+ * service.
+ */
+static void
+cli_service_restart_listener(int argc, char **argv)
+{
+	(void) cli_service_restart("listener");
+}
+
+
+/*
+ * cli_service_restart_postgres sends the TERM signal to the keeper node
+ * active service, which is known to have the restart policy RP_PERMANENT
+ * (that's hard-coded). As a consequence the supervisor will restart the
+ * service.
+ */
+static void
+cli_service_restart_node_active(int argc, char **argv)
+{
+	(void) cli_service_restart("node active");
+}
+
+
+/*
+ * cli_service_restart_all sends the TERM signal to all the keeper services. We
+ * assume that those services have the restart policy RP_PERMANENT, which is
+ * hard-coded.
+ */
+static void
+cli_service_restart_all(int argc, char **argv)
+{
+	ConfigFilePaths pathnames = { 0 };
+	LocalPostgresServer postgres = { 0 };
+
+	long fileSize = 0L;
+	char *fileContents = NULL;
+	char *fileLines[BUFSIZE] = { 0 };
+	int lineCount = 0;
+	int lineNumber;
+
+	if (!cli_common_pgsetup_init(&pathnames, &(postgres.postgresSetup)))
+	{
+		/* errors have already been logged */
+		exit(EXIT_CODE_BAD_CONFIG);
+	}
+
+	if (!file_exists(pathnames.pid))
+	{
+		/* errors have already been logged */
+		exit(EXIT_CODE_BAD_STATE);
+	}
+
+	if (!read_file(pathnames.pid, &fileContents, &fileSize))
+	{
+		/* errors have already been logged */
+		exit(EXIT_CODE_BAD_STATE);
+	}
+
+	lineCount = splitLines(fileContents, fileLines, BUFSIZE);
+
+	for (lineNumber = 0; lineNumber < lineCount; lineNumber++)
+	{
+		char *serviceName = NULL;
+		char *separator = NULL;
+		pid_t pid;
+
+		/* skip first and second lines: main pid, semaphore id */
+		if (lineNumber < 2)
+		{
+			continue;
+		}
+
+		if ((separator = strchr(fileLines[lineNumber], ' ')) == NULL)
+		{
+			log_debug("Failed to find a space separator in line: \"%s\"",
+					  fileLines[lineNumber]);
+			continue;
+		}
+
+		serviceName = separator + 1;
+		*separator = '\0';
+		stringToInt(fileLines[lineNumber], &pid);
+
+		log_info("Restarting service \"%s\" with pid %d", serviceName, pid);
+	}
 }

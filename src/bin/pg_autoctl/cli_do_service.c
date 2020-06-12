@@ -41,11 +41,6 @@ static void cli_do_service_getpid_postgres(int argc, char **argv);
 static void cli_do_service_getpid_listener(int argc, char **argv);
 static void cli_do_service_getpid_node_active(int argc, char **argv);
 
-static void cli_do_service_restart(const char *serviceName);
-static void cli_do_service_restart_postgres(int argc, char **argv);
-static void cli_do_service_restart_listener(int argc, char **argv);
-static void cli_do_service_restart_node_active(int argc, char **argv);
-
 static void cli_do_service_monitor_listener(int argc, char **argv);
 static void cli_do_service_node_active(int argc, char **argv);
 
@@ -118,45 +113,8 @@ CommandLine do_service_getpid_commands =
 					 NULL, NULL,
 					 NULL, service_getpid);
 
-CommandLine service_restart_postgres =
-	make_command("postgres",
-				 "Restart the pg_autoctl postgres controller service",
-				 CLI_PGDATA_USAGE,
-				 CLI_PGDATA_OPTION,
-				 cli_getopt_pgdata,
-				 cli_do_service_restart_postgres);
-
-CommandLine service_restart_listener =
-	make_command("listener",
-				 "Restart the pg_autoctl monitor listener service",
-				 CLI_PGDATA_USAGE,
-				 CLI_PGDATA_OPTION,
-				 cli_getopt_pgdata,
-				 cli_do_service_restart_listener);
-
-CommandLine service_restart_node_active =
-	make_command("node-active",
-				 "Restart the pg_autoctl keeper node-active service",
-				 CLI_PGDATA_USAGE,
-				 CLI_PGDATA_OPTION,
-				 cli_getopt_pgdata,
-				 cli_do_service_restart_node_active);
-
-static CommandLine *service_restart[] = {
-	&service_restart_postgres,
-	&service_restart_listener,
-	&service_restart_node_active,
-	NULL
-};
-
-CommandLine do_service_restart_commands =
-	make_command_set("restart",
-					 "Restart pg_autoctl sub-processes (services)", NULL, NULL,
-					 NULL, service_restart);
-
 static CommandLine *service[] = {
 	&do_service_getpid_commands,
-	&do_service_restart_commands,
 	&service_pgcontroller,
 	&service_postgres,
 	&service_monitor_listener,
@@ -253,103 +211,6 @@ static void
 cli_do_service_getpid_node_active(int argc, char **argv)
 {
 	(void) cli_do_service_getpid("node active");
-}
-
-
-/*
- * cli_do_service_restart sends the TERM signal to the given serviceName, which
- * is known to have the restart policy RP_PERMANENT (that's hard-coded). As a
- * consequence the supervisor will restart the service.
- */
-static void
-cli_do_service_restart(const char *serviceName)
-{
-	ConfigFilePaths pathnames = { 0 };
-	LocalPostgresServer postgres = { 0 };
-
-	pid_t pid = -1;
-	pid_t newPid = -1;
-
-	if (!cli_common_pgsetup_init(&pathnames, &(postgres.postgresSetup)))
-	{
-		/* errors have already been logged */
-		exit(EXIT_CODE_BAD_CONFIG);
-	}
-
-	if (!supervisor_find_service_pid(pathnames.pid, serviceName, &pid))
-	{
-		log_fatal("Failed to find pid for service name \"%s\"", serviceName);
-		exit(EXIT_CODE_INTERNAL_ERROR);
-	}
-
-	log_info("Sending the TERM signal to service \"%s\" with pid %d",
-			 serviceName, pid);
-
-	if (kill(pid, SIGTERM) != 0)
-	{
-		log_error("Failed to send SIGHUP to the pg_autoctl pid %d: %m", pid);
-		exit(EXIT_CODE_INTERNAL_ERROR);
-	}
-
-	/* loop until we have a new pid */
-	do {
-		if (!supervisor_find_service_pid(pathnames.pid, serviceName, &newPid))
-		{
-			log_fatal("Failed to find pid for service name \"%s\"", serviceName);
-			exit(EXIT_CODE_INTERNAL_ERROR);
-		}
-
-		if (newPid == pid)
-		{
-			log_trace("pidfile \"%s\" still contains pid %d for service \"%s\"",
-					  pathnames.pid, newPid, serviceName);
-		}
-
-		pg_usleep(100 * 1000);  /* retry in 100 ms */
-	} while (newPid == pid);
-
-	log_info("Service \"%s\" has been restarted with pid %d",
-			 serviceName, newPid);
-
-	fformat(stdout, "%d\n", pid);
-}
-
-
-/*
- * cli_do_service_restart_postgres sends the TERM signal to the postgres
- * service, which is known to have the restart policy RP_PERMANENT (that's
- * hard-coded). As a consequence the supervisor will restart the service.
- */
-static void
-cli_do_service_restart_postgres(int argc, char **argv)
-{
-	(void) cli_do_service_restart("postgres");
-}
-
-
-/*
- * cli_do_service_restart_postgres sends the TERM signal to the monitor
- * listener service, which is known to have the restart policy RP_PERMANENT
- * (that's hard-coded). As a consequence the supervisor will restart the
- * service.
- */
-static void
-cli_do_service_restart_listener(int argc, char **argv)
-{
-	(void) cli_do_service_restart("listener");
-}
-
-
-/*
- * cli_do_service_restart_postgres sends the TERM signal to the keeper node
- * active service, which is known to have the restart policy RP_PERMANENT
- * (that's hard-coded). As a consequence the supervisor will restart the
- * service.
- */
-static void
-cli_do_service_restart_node_active(int argc, char **argv)
-{
-	(void) cli_do_service_restart("node active");
 }
 
 
