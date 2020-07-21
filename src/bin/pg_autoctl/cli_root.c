@@ -38,8 +38,6 @@ CommandLine *show_subcommands_with_debug[] = {
 	&show_uri_command,
 	&show_events_command,
 	&show_state_command,
-	&show_nodes_command,
-	&show_sync_standby_names_command,
 	&show_standby_names_command,
 	&show_file_command,
 	&systemd_cat_service_file_command,
