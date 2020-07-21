@@ -1425,7 +1425,14 @@ monitor_print_state(Monitor *monitor, char *formation, int group)
 	{
 		case -1:
 		{
-			sql = "SELECT * FROM pgautofailover.current_state($1)";
+			sql =
+				"SELECT $1, s.nodename, "
+				"current_group_state, assigned_group_state, "
+				"candidate_priority, replication_quorum, "
+				"reportedlsn, health "
+				"FROM pgautofailover.current_state($1) s "
+				"JOIN pgautofailover.node n ON s.node_id = n.nodeid "
+				"ORDER BY node_id";
 
 			paramCount = 1;
 			paramTypes[0] = TEXTOID;
@@ -1436,7 +1443,14 @@ monitor_print_state(Monitor *monitor, char *formation, int group)
 
 		default:
 		{
-			sql = "SELECT * FROM pgautofailover.current_state($1,$2)";
+			sql =
+				"SELECT $1, s.nodename, "
+				"current_group_state, assigned_group_state, "
+				"candidate_priority, replication_quorum, "
+				"reportedlsn, health "
+				"FROM pgautofailover.current_state($1,$2) s "
+				"JOIN pgautofailover.node n ON s.node_id = n.nodeid "
+				"ORDER BY node_id";
 
 			groupStr = intToString(group);
 
@@ -1482,10 +1496,12 @@ printCurrentState(void *ctx, PGresult *result)
 		(MonitorAssignedStateParseContext *) ctx;
 	int currentTupleIndex = 0;
 	int nTuples = PQntuples(result);
-	int maxNodeNameSize = 5;    /* strlen("Name") + 1, the header */
-	char *nameSeparatorHeader = NULL;
 
-	bool pg_autoctl_debug = env_exists(PG_AUTOCTL_DEBUG);
+	int maxFormationSize = 10;  /* strlen("Formation") + 1, the header */
+	int maxNodeNameSize = 5;    /* strlen("Name") + 1, the header */
+
+	char *nameSeparatorHeader = NULL;
+	char *formationSeparatorHeader = NULL;
 
 	if (PQnfields(result) != 8)
 	{
@@ -1500,84 +1516,77 @@ printCurrentState(void *ctx, PGresult *result)
 	 */
 	for (currentTupleIndex = 0; currentTupleIndex < nTuples; currentTupleIndex++)
 	{
-		char *nodename = PQgetvalue(result, currentTupleIndex, 0);
+		char *formation = PQgetvalue(result, currentTupleIndex, 0);
+		char *nodename = PQgetvalue(result, currentTupleIndex, 1);
 
 		if (strlen(nodename) > maxNodeNameSize)
 		{
 			maxNodeNameSize = strlen(nodename);
 		}
+
+		if (strlen(formation) > maxFormationSize)
+		{
+			maxFormationSize = strlen(formation);
+		}
 	}
 
 	/* prepare a nice dynamic string of '-' as a header separator */
 	nameSeparatorHeader = (char *) malloc((maxNodeNameSize + 1) * sizeof(char));
+	formationSeparatorHeader =
+		(char *) malloc((maxFormationSize + 1) * sizeof(char));
 
-	if (nameSeparatorHeader == NULL)
+	if (nameSeparatorHeader == NULL || formationSeparatorHeader == NULL)
 	{
 		log_error("Failed to allocate memory, probably because it's all used");
 		context->parsedOK = false;
 		return;
 	}
 
-	for (int i = 0; i <= maxNodeNameSize; i++)
+	bzero((void *) nameSeparatorHeader, maxNodeNameSize);
+	bzero((void *) formationSeparatorHeader, maxFormationSize);
+
+	for (int i = 0; i < maxNodeNameSize; i++)
 	{
-		if (i < maxNodeNameSize)
-		{
-			nameSeparatorHeader[i] = '-';
-		}
-		else
-		{
-			nameSeparatorHeader[i] = '\0';
-		}
+		nameSeparatorHeader[i] = '-';
 	}
 
-	if (pg_autoctl_debug)
+	for (int i = 0; i < maxFormationSize; i++)
 	{
-		fformat(stdout, "%*s | %6s | %5s | %5s | %17s | %17s | %8s | %6s\n",
-				maxNodeNameSize, "Name", "Port",
-				"Group", "Node", "Current State", "Assigned State",
-				"Priority", "Quorum");
-
-		fformat(stdout, "%*s-+-%6s-+-%5s-+-%5s-+-%17s-+-%17s-+-%8s-+-%6s\n",
-				maxNodeNameSize, nameSeparatorHeader, "------",
-				"-----", "-----", "-----------------", "-----------------",
-				"--------", "------");
+		formationSeparatorHeader[i] = '-';
 	}
-	else
-	{
-		fformat(stdout, "%*s | %6s | %5s | %5s | %17s | %17s\n",
-				maxNodeNameSize, "Name", "Port",
-				"Group", "Node", "Current State", "Assigned State");
 
-		fformat(stdout, "%*s-+-%6s-+-%5s-+-%5s-+-%17s-+-%17s\n",
-				maxNodeNameSize, nameSeparatorHeader, "------",
-				"-----", "-----", "-----------------", "-----------------");
-	}
+	fformat(stdout, "%*s | %*s | %17s | %17s | %8s | %6s | %18s | %6s\n",
+			maxFormationSize, "Formation",
+			maxNodeNameSize, "Name",
+			"Current State", "Assigned State", "Priority", "Quorum",
+			"LSN", "Health");
+
+	fformat(stdout, "%*s-+-%*s-+-%17s-+-%17s-+-%8s-+-%6s-+-%18s-+-%6s\n",
+			maxFormationSize, formationSeparatorHeader,
+			maxNodeNameSize, nameSeparatorHeader,
+			"-----------------", "-----------------",
+			"--------", "------", "------------------", "------");
+
 	free(nameSeparatorHeader);
+	free(formationSeparatorHeader);
 
 	for (currentTupleIndex = 0; currentTupleIndex < nTuples; currentTupleIndex++)
 	{
-		char *nodename = PQgetvalue(result, currentTupleIndex, 0);
-		char *nodeport = PQgetvalue(result, currentTupleIndex, 1);
-		char *groupId = PQgetvalue(result, currentTupleIndex, 2);
-		char *nodeId = PQgetvalue(result, currentTupleIndex, 3);
-		char *currentState = PQgetvalue(result, currentTupleIndex, 4);
-		char *goalState = PQgetvalue(result, currentTupleIndex, 5);
-		char *candidatePriority = PQgetvalue(result, currentTupleIndex, 6);
-		char *replicationQuorum = PQgetvalue(result, currentTupleIndex, 7);
+		char *formation = PQgetvalue(result, currentTupleIndex, 0);
+		char *nodename = PQgetvalue(result, currentTupleIndex, 1);
+		char *currentState = PQgetvalue(result, currentTupleIndex, 2);
+		char *goalState = PQgetvalue(result, currentTupleIndex, 3);
+		char *candidatePriority = PQgetvalue(result, currentTupleIndex, 4);
+		char *replicationQuorum = PQgetvalue(result, currentTupleIndex, 5);
+		char *lsn = PQgetvalue(result, currentTupleIndex, 6);
+		char *health = PQgetvalue(result, currentTupleIndex, 7);
 
-		if (pg_autoctl_debug)
-		{
-			fformat(stdout, "%*s | %6s | %5s | %5s | %17s | %17s | %8s | %6s\n",
-					maxNodeNameSize, nodename, nodeport,
-					groupId, nodeId, currentState, goalState,
-					candidatePriority, replicationQuorum);
-		}
-		else
-		{
-			fformat(stdout, "%*s | %6s | %5s | %5s | %17s | %17s\n",
-					maxNodeNameSize, nodename, nodeport,
-					groupId, nodeId, currentState, goalState);
-		}
+		fformat(stdout, "%*s | %*s | %17s | %17s | %8s | %6s | %18s | %6s\n",
+				maxFormationSize, formation,
+				maxNodeNameSize, nodename,
+				currentState, goalState, candidatePriority, replicationQuorum,
+				lsn,
+				strcmp(health, "1") == 0 ? "✓" : "✗");
 	}
 	fformat(stdout, "\n");
 
