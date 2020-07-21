@@ -106,14 +106,10 @@
 	make_strbuf_option("ssl", "key_file", "server-key", \
 					   false, MAXPGPATH, config->pgSetup.ssl.serverKey)
 
-#define OPTION_REPLICATION_SLOT_NAME(config) \
-	make_string_option_default("replication", "slot", NULL, false, \
-							   &config->replication_slot_name, \
-							   REPLICATION_SLOT_NAME_DEFAULT)
-
 #define OPTION_REPLICATION_PASSWORD(config) \
-	make_string_option_default("replication", "password", NULL, \
-							   false, &config->replication_password, \
+	make_strbuf_option_default("replication", "password", NULL, \
+							   false, MAXCONNINFO, \
+							   config->replication_password, \
 							   REPLICATION_PASSWORD_DEFAULT)
 
 #define OPTION_REPLICATION_MAXIMUM_BACKUP_RATE(config) \
@@ -182,7 +178,6 @@
 		OPTION_SSL_CRL_FILE(config), \
 		OPTION_SSL_SERVER_CERT(config), \
 		OPTION_SSL_SERVER_KEY(config), \
-		OPTION_REPLICATION_SLOT_NAME(config), \
 		OPTION_REPLICATION_MAXIMUM_BACKUP_RATE(config), \
 		OPTION_REPLICATION_BACKUP_DIR(config), \
 		OPTION_REPLICATION_PASSWORD(config), \
@@ -490,8 +485,6 @@ keeper_config_log_settings(KeeperConfig config)
 	log_debug("postgresql.host: %s", config.pgSetup.pghost);
 	log_debug("postgresql.port: %d", config.pgSetup.pgport);
 
-	log_debug("replication.replication_slot_name: %s",
-			  config.replication_slot_name);
 	log_debug("replication.replication_password: %s",
 			  config.replication_password);
 	log_debug("replication.maximum_backup_rate: %s",
@@ -607,14 +600,12 @@ bool
 keeper_config_set_groupId_and_slot_name(KeeperConfig *config,
 										int nodeId, int groupId)
 {
-	char buffer[BUFSIZE] = { 0 };
-	char *replicationSlotName = NULL;
-
-	(void) postgres_sprintf_replicationSlotName(nodeId, buffer, sizeof(buffer));
-	replicationSlotName = strdup(buffer);
-
 	config->groupId = groupId;
-	config->replication_slot_name = replicationSlotName;
+
+	(void) postgres_sprintf_replicationSlotName(
+		nodeId,
+		config->replication_slot_name,
+		sizeof(config->replication_slot_name));
 
 	return keeper_config_write_file(config);
 }
@@ -626,19 +617,9 @@ keeper_config_set_groupId_and_slot_name(KeeperConfig *config,
 void
 keeper_config_destroy(KeeperConfig *config)
 {
-	if (config->replication_slot_name != NULL)
-	{
-		free(config->replication_slot_name);
-	}
-
 	if (config->maximum_backup_rate != NULL)
 	{
 		free(config->maximum_backup_rate);
-	}
-
-	if (config->replication_password != NULL)
-	{
-		free(config->replication_password);
 	}
 }
 
@@ -728,8 +709,9 @@ keeper_config_accept_new(KeeperConfig *config, KeeperConfig *newConfig)
 		log_info("Reloading configuration: replication password has changed");
 
 		/* note: strneq checks args are not NULL, it's safe to proceed */
-		free(config->replication_password);
-		config->replication_password = strdup(newConfig->replication_password);
+		strlcpy(config->replication_password,
+				newConfig->replication_password,
+				MAXCONNINFO);
 	}
 
 	/*
